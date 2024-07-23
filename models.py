@@ -1,0 +1,224 @@
+### PREDICT ONLY SEA ICE U & V
+
+# Ignore warning
+import warnings
+warnings.filterwarnings("ignore")
+
+import pandas as pd
+import glob, os
+import matplotlib.pyplot as plt
+import numpy as np
+import geopandas
+import datetime as dt
+from datetime import datetime
+import pyproj
+
+from tqdm import tqdm
+
+import pickle
+
+import torch
+    
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+import dgl
+from dgl.data import DGLDataset
+
+def normalize_input(inputs, c):
+    vmax = [+20, +20, 1, 280, +20, +20, 30, +0.5, 0.7, 1]
+    vmin = [-20, -20, 0, 230, -20, -20,  0, -0.5, 0.0, 0]
+    if vmin[c] < 0:
+        norm_inputs = 2*(inputs - vmin[c]) / (vmax[c] - vmin[c]) - 1
+    else:
+        norm_inputs = (inputs - vmin[c]) / (vmax[c] - vmin[c])
+    return norm_inputs
+
+def make_mlp_input(inputs, outputs, laps = 4):
+    # Input & output should be entire images for CNN
+    n_samples, var_ip, row, col = np.shape(inputs)
+    _, var_op, _, _ = np.shape(outputs)
+    
+    first = True
+    for n in range(0, n_samples-laps):
+        sic = inputs[n+laps, 2, :, :]
+        valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0))
+    
+        n_valid = valid[0].shape[0]
+    
+        ann_input0 = np.zeros([n_valid, var_ip * laps])
+        ann_output0 = np.zeros([n_valid, var_op])
+        
+        for v in range(0, var_ip):
+            for i in range(0, laps):
+                ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v][valid], v)
+        for v in range(0, var_op):
+            ann_output0[:, v] = outputs[n+laps, v][valid]
+    
+        if first:
+            ann_input = ann_input0
+            ann_output = ann_output0
+            first = False
+        else:
+            ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+            ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
+
+        
+    return ann_input, ann_output
+
+def make_cnn_input(inputs, outputs, laps = 4):
+    # Input & output should be entire images for CNN
+    n_samples, var_ip, row, col = np.shape(inputs)
+    _, var_op, _, _ = np.shape(outputs)
+
+    ann_input = np.zeros([n_samples*row*col, var_ip * laps, row, col])
+    ann_output = np.zeros([n_samples*row*col, var_op, row, col])
+
+    first = True
+    for n in range(0, n_samples-laps):
+        sic = data_input[n+laps, 2, :, :]
+        valid = sic > 0.8
+        for v in range(0, var_ip):
+            for i in range(0, laps):
+                ann_input[n, v+i, :, :] = (inputs[n+i, v, :, :])
+        for v in range(0, var_op):
+            ann_output[n, v, :, :] = (outputs[n+days, v, :, :])
+    return ann_input, ann_output
+
+## Dataset for train ===================================
+class make_gnn_output(DGLDataset):
+    def __init__(self, filename):
+        super().__init__(name="pig", url = filename)
+        
+    def process(self):
+        self.graphs = []
+        files = self.url
+        
+        # # Region filtering
+        # filename = f'D:\\ISSM\\Helheim\\Helheim_r100_030.mat'
+        # test = sio.loadmat(filename)
+        # mask = test['S'][0][0][11][0]
+
+        first = True
+        # "READING GRAPH DATA..."
+        for filename in tqdm(files[:]):
+            mesh = int(filename.split("_m")[1][:3])
+            rate = int(filename.split("_r")[1][:3])
+            test = sio.loadmat(filename)
+
+            xc = test['S'][0][0][0]
+            yc = test['S'][0][0][1]
+            elements = test['S'][0][0][2]-1
+            smb = test['S'][0][0][3]
+            vx = test['S'][0][0][4]
+            vy = test['S'][0][0][5]
+            vel = test['S'][0][0][6]
+            surface = test['S'][0][0][7]
+            base = test['S'][0][0][8]
+            H = test['S'][0][0][9]
+            f = test['S'][0][0][10]
+            # mask = test['S'][0][0][11]
+            # ice = np.zeros(mask.shape) # Negative: ice; Positive: no-ice
+            # ice[mask > 0] = 0.5 # ice = 0; no-ice = 1
+            # ice = np.where(mask < 0, mask / 1000000, mask/10000)
+
+            n_year, n_sample = H.shape
+            
+            if first:
+                mesh0 = mesh
+            elif mesh0 != mesh:
+                first = True
+                mesh0 = mesh
+
+            if first:
+                src = []
+                dst = []
+                weight = []
+                slope = []
+
+                for i in range(0, n_sample):        
+                    p1, p2 = np.where(elements == i)
+                    connect = []
+
+                    for p in p1:
+                        for k in elements[p]:
+                            if (k != i) and (k not in connect):
+                                connect.append(k)
+                                dist = ((xc[i]-xc[k])**2+(yc[i]-yc[k])**2)**0.5                                
+                                weight.append(np.exp(-(dist/1000)))
+                                slope.append([np.exp(-(dist/1000)), (base[0,i]-base[0,k])/dist, (surface[0,i]-surface[0,k])/dist,
+                                             (vx[0,i]-vx[0,k])/dist, (vy[0,i]-vy[0,k])/dist]) 
+                                src.append(int(i))
+                                dst.append(int(k))
+
+                src = torch.tensor(src)
+                dst = torch.tensor(dst)
+                weight = torch.tensor(weight)
+                slope = torch.arctan(torch.tensor(slope))
+                first = False
+            else:
+                pass                    
+
+            for t in range(0, n_year):
+                # INPUT: x/y coordinates, melting rate, time, SMB, Vx0, Vy0, Surface0, Base0, Thickness0, Floating0
+                inputs = torch.zeros([n_sample, 12])
+                # OUTPUT: Vx, Vy, Vel, Surface, Thickness, Floating
+                outputs = torch.zeros([n_sample, 6])
+
+                ## INPUTS ================================================
+                inputs[:, 0] = torch.tensor((xc[:, 0]-xc.min())/10000) # torch.tensor(xc[0, :]/10000) # torch.tensor((xc[:, 0]-xc.min())/(xc.max()-xc.min())) # X coordinate
+                inputs[:, 1] = torch.tensor((yc[:, 0]-yc.min())/10000) # torch.tensor(yc[0, :]/10000) # torch.tensor((yc[:, 0]-yc.min())/(yc.max()-yc.min())) # Y coordinate
+                inputs[:, 2] = torch.where(torch.tensor(f[0, :]) < 0, rate/100, 0) # Melting rate (0-100)
+                inputs[:, 3] = torch.tensor(t/n_year) # Year
+                inputs[:, 4] = torch.tensor(smb[t, :]/20) # Surface mass balance
+                inputs[:, 5] = torch.tensor(vx[0, :]/10000) # Initial Vx
+                inputs[:, 6] = torch.tensor(vy[0, :]/10000) # Initial Vx
+                inputs[:, 7] = torch.tensor(vel[0, :]/10000) # Initial Vel
+                inputs[:, 8] = torch.tensor(surface[0, :]/5000) # Initial surface elevation
+                inputs[:, 9] = torch.tensor(base[0, :]/5000) # Initial base elevation
+                inputs[:, 10] = torch.tensor(H[0, :]/5000) # Initial ice thickness
+                inputs[:, 11] = torch.tensor(f[0, :]/5000) # Initial floating part
+                # inputs[:, 11] = torch.tensor(ice[0, :]) # Initial ice mask
+
+                ## OUTPUTS ===============================================
+                outputs[:, 0] = torch.tensor(vx[t, :]/10000) # Initial Vx
+                outputs[:, 1] =  torch.tensor(vy[t, :]/10000) # Initial Vx
+                outputs[:, 2] = torch.tensor(vel[t, :]/10000) # Initial surface elevation
+                outputs[:, 3] = torch.tensor(surface[t, :]/5000) # Initial base elevation
+                outputs[:, 4] = torch.tensor(H[t, :]/5000) # Initial ice thickness
+                outputs[:, 5] = torch.tensor(f[t, :]/5000) # Initial floating part 
+                # outputs[:, 5] = torch.tensor(ice[t, :]) # Initial floating part 
+
+                g = dgl.graph((src, dst), num_nodes=n_sample)
+                g.ndata['feat'] = inputs
+                g.ndata['label'] = outputs
+                g.edata['weight'] = weight
+                g.edata['slope'] = slope
+
+                self.graphs.append(g)
+        
+    def __getitem__(self, i):
+        return self.graphs[i]
+    
+    def __len__(self):
+        return len(self.graphs)
+
+
+class MLP(nn.Module):    
+    def __init__(self, ch_input, ch_output, features = 128, hidden_layers = 4):
+        super(MLP, self).__init__()
+        
+        modules = [nn.Linear(ch_input, features)]
+        for i in range(hidden_layers):
+            modules.append(nn.Linear(features, features))
+            modules.append(nn.ReLU())
+        modules.append(nn.Linear(features, ch_output))
+        self.lin = nn.Sequential(*modules)
+
+    def forward(self, in_feat):
+
+        x = self.lin(in_feat)
+        
+        return x
+

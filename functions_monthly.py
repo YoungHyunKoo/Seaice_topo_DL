@@ -30,7 +30,7 @@ data_path = "D:\\PINN\\data"
 
 from scipy.ndimage.filters import gaussian_filter
 
-def get_ice_motion(ncfile, i, xx, yy, sampling_size = 1, region = "SH"):
+def get_ice_motion(ncfile, i, sampling_size = 1):
 # ncfile: input monthly ERA5 file (ncfile)
 # field: input variable ('sst', 't2m', 'u10', 'v10')
 # bounding_box: processed area (Ross Sea - Amundsen Sea)
@@ -43,7 +43,7 @@ def get_ice_motion(ncfile, i, xx, yy, sampling_size = 1, region = "SH"):
     
         xs = np.array(nc.variables['x'])[::sampling_size]
         ys = np.array(nc.variables['y'])[::sampling_size]  
-        xx1, yy1 = np.meshgrid(xs, ys)
+        xx, yy = np.meshgrid(xs, ys)
         lat = np.array(nc.variables['latitude'])[::sampling_size, ::sampling_size]
         lon = np.array(nc.variables['longitude'])[::sampling_size, ::sampling_size]
     
@@ -55,23 +55,17 @@ def get_ice_motion(ncfile, i, xx, yy, sampling_size = 1, region = "SH"):
     
             data = np.array(nc.variables[field][i][::sampling_size, ::sampling_size])
             # cm/s to km/day
-            data[data == -9999] = np.nan
+            data[data == -9999] = np.nan                      
+    
+            data_mean = np.array([np.mean(data, axis = 0)])
     
             # df[field] = data_mean.flatten()
-            if region == "NH":
-                inProj = Proj('epsg:3408')
-                outProj = Proj('epsg:3411') #EASE:3408
-            elif region == "SH":
-                inProj = Proj('epsg:3409')
-                outProj = Proj('epsg:3412') #EASE:3409
-            xx2,yy2 = transform(inProj,outProj,xx1,yy1)
-            grid_data = griddata((xx2.flatten(), yy2.flatten()), data.flatten(), (xx, yy), method='linear')
-
+    
             if field == "u":
-                u = np.array([grid_data]) # data_mean
+                u = data # data_mean
                 # u[np.isnan(u)] = 0
             elif field == "v":
-                v = np.array([grid_data]) # data_mean
+                v = data # data_mean
                 # v[np.isnan(v)] = 0   
     
     u[np.isnan(u)] = 0
@@ -144,10 +138,10 @@ def get_SIC(t1, xx, yy, dtype = "noaa", region = "SH"):
                 # ESPG:3411 (NSIDC Sea Ice Polar Stereographic North - SIC data)
                 if region == "NH":
                     inProj = Proj('epsg:3411')
-                    outProj = Proj('epsg:3411') #EASE:3408
+                    outProj = Proj('epsg:3408')
                 elif region == "SH":
                     inProj = Proj('epsg:3412')
-                    outProj = Proj('epsg:3412') #EASE:3409
+                    outProj = Proj('epsg:3409')
                 xx1, yy1 = np.meshgrid(xx0, yy0)
                 xx2,yy2 = transform(inProj,outProj,xx1,yy1)
                 grid_sic = griddata((xx2.flatten(), yy2.flatten()), sic.flatten(), (xx, yy), method='linear')
@@ -158,11 +152,11 @@ def get_SIC(t1, xx, yy, dtype = "noaa", region = "SH"):
             print("Filename is NOT correct!")
 
 def retrieve_hourly_ERA5(year, months, days, region = "SH"):
-    c = cdsapi.Client(quiet=True)
+    c = cdsapi.Client()
     # dataset to read
     dataset = 'reanalysis-era5-single-levels'
     # flag to download data
-    # download_flag = False
+    download_flag = False
     variables = [
         '10m_u_component_of_wind', '10m_v_component_of_wind', 'instantaneous_10m_wind_gust',
         '2m_temperature', 'sea_ice_cover', 'surface_pressure'
@@ -252,23 +246,23 @@ def rotate_vector(u, v, lon, ref_lon = 0):
     v2 = u*np.sin(angle) + v*np.cos(angle)
     return u2, v2
 
-def get_ERA5(ds, idx_era, xx, yy, region = "NH", ref_lon = 0):
+def get_ERA5(ds, i, xx, yy, region = "NH", ref_lon = 0):
     lat3, lon3 = np.meshgrid(ds.latitude, ds.longitude)
     inProj = Proj('epsg:4326')
     if region == "NH":
         if ref_lon == 0:
-            outProj = Proj('epsg:3411')
+            outProj = Proj('epsg:3408')
         elif ref_lon == -45:
             outProj = Proj('proj4: +proj=stere +lon_0=-45 +lat_0=90 +k=1 +R=6378273 +no_defs')
     elif region == "SH":
-        outProj = Proj('epsg:3412')
+        outProj = Proj('epsg:3409')
         
     xx3,yy3 = transform(inProj,outProj,lat3,lon3)
-    t2m = np.nanmean(np.array(ds.t2m)[idx_era], axis = 0).transpose()
-    u10 = np.nanmean(np.array(ds.u10)[idx_era], axis = 0).transpose()
-    v10 = np.nanmean(np.array(ds.v10)[idx_era], axis = 0).transpose()
-    sic = np.nanmean(np.array(ds.siconc)[idx_era], axis = 0).transpose()
-    i10 = np.nanmean(np.array(ds.i10fg)[idx_era], axis = 0).transpose()
+    t2m = np.array(ds.t2m[i]).transpose()
+    u10 = np.array(ds.u10[i]).transpose()
+    v10 = np.array(ds.v10[i]).transpose()
+    sic = np.array(ds.siconc[i]).transpose()
+    i10 = np.array(ds.i10fg[i]).transpose()
     
     u10, v10 = rotate_vector(u10, v10, lon3, ref_lon)
     
@@ -305,118 +299,102 @@ def calculate_shr(u, v, dx = 25, dy = 25):
     shr[:, 1:-1, 1:-1] = ((dudx - dvdy)**2 + (dudy + dvdx)**2)**0.5
     return shr
 
-def make_dataset(year, sector = "Ross", region = "SH"):
-    # Weekly time frame using sea ice drift data ====================
-    ncfile = data_path + f"/{region}/Sea_ice_drift/icemotion_weekly_{region.lower()}_25km_{year}0101_{year}1231_v4.1.nc"
-    ds1 = xr.open_dataset(ncfile)
-    datetimeindex = ds1.time.astype("datetime64[ns]").values #ds1.indexes['time'].to_datetimeindex() #
-    d1, d2 = [], []
-    for i, d in enumerate(datetimeindex):
-        d1.append(pd.to_datetime(d) + dt.timedelta(days = 0))
-        d2.append(pd.to_datetime(d) + dt.timedelta(days = 7))
-    n_samples = np.arange(0, len(d1), 1)
+def make_dataset(year, month, w = 1, region = "SH"):
+    # ncfile = glob.glob("F:\\2022_Ross\\ERA5\\icemotion_daily_sh_25km_{0}*.nc".format(year))[0]
+    ncfile = data_path + f"/{region}/Sea_ice_drift/icemotion_daily_{region.lower()}_25km_{year}0101_{year}1231_v4.1.nc"
+    with netCDF4.Dataset(ncfile, 'r') as nc:
+    ## Adjust the number of training datasets ===========================
+        days = np.array(nc.variables['time']).astype(float)[:]
+        row, col = np.shape(np.array(nc.variables['latitude']))
 
-    # Read IS2 nc file ==================================
-    is2_nc = f'D:\\IS2_topo_DL\\Ridges_density_{sector}_{year}.nc'
-    is2 = xr.open_dataset(is2_nc)
+    d1 = int(dt.datetime(year, month, 1).strftime('%j')) - 1
+    if month == 12:
+        d2 = int(dt.datetime(year, 12, 31).strftime('%j')) - 2
+    else:
+        d2 = int(dt.datetime(year, month+1, 1).strftime('%j')) - 1
 
-    with netCDF4.Dataset(is2_nc, 'r') as nc:
-        lat = np.array(nc.variables['lat'])
-        lon = np.array(nc.variables['lon'])
-        x = np.array(nc.variables['x'])
-        y = np.array(nc.variables['y'])
-        xx, yy = np.meshgrid(x, y)
-        times = nc.variables['time']
-        times = num2date(times[:], units = times.units)
-    
-    row, col = np.shape(xx)    
+    n_samples = np.arange(d1, d2, 1)
 
-    # Initialize grid input & output ==========================================
-    grid_input = np.zeros([len(d1), 10, row, col])
-    fields = ['fb_mode', 'fb_std', 'fr_ridge', 'h_ridge']
-    output = np.zeros([len(d1), len(fields), row, col])
-
-    for i in n_samples:
-
-        print(i, d1[i], d2[i])
-
-        # ICESat2 ============================================        
-        tidx = np.where((times >= d1[i]) & (times < d2[i]))[0]
-        fb_count = np.nansum(np.array(is2.variables["fb_count"][tidx, :, :]), axis = 0)
-        valid_count = (fb_count > 200)
-
-        for f, field1 in enumerate(fields):
-            array = np.array(is2.variables[field1][tidx, :, :])
-            # array = np.transpose(np.array(ds.variables[field1][tidx, :, :]), axes = (0, 2, 1))
-            data1 = np.nanmean(array, axis = 0)
-            data1[~valid_count] = np.nan
-            output[i,f] = np.transpose(np.nanmean(array, axis = 0))
-
-        # ERA5 =================================================
-        months, days = [], []
-        for n in range(0, 7):
-            m = str((d1[i] + dt.timedelta(days = n)).month).zfill(2)
-            d = str((d1[i] + dt.timedelta(days = n)).day).zfill(2)
-            if m not in months:
-                months.append(m)
-            if d not in days:
-                days.append(d)
-        ds = retrieve_hourly_ERA5(year, months, days, region)
-        # print("Load ERA5")
+    # ERA5 =================================================
+    ds = retrieve_monthly_ERA5(year, month, region)
+    print("Load ERA5")
         
-        ## Read ice motion data ===========================================
-        sampling_size = 1
-        xx, yy, lat, lon, u, v = get_ice_motion(ncfile, i, xx, yy, sampling_size, region)
-        grid_u = np.nanmean(u, axis = 0)
-        grid_v = np.nanmean(v, axis = 0)
-        # Divergence
-        div = calculate_div(u, v, dx = 25, dy = 25)
-        # Shear rate
-        shr = calculate_shr(u, v, dx = 25, dy = 25)
-        # print("Sea ice motion updated")
+    # Initialize grid input ==========================================
+    grid_input = np.zeros([1, row, col, 13])
+
+    ## Read ice motion data ===========================================
+    sampling_size = 1
+    xx, yy, lat, lon, u, v = get_ice_motion(ncfile, n_samples, sampling_size)
+    print(u.shape)
+    grid_u = np.nanmean(u, axis = 0)
+    grid_v = np.nanmean(v, axis = 0)
+    # Divergence
+    div = calculate_div(u, v, dx = 25, dy = 25)
+    div95 = np.nanquantile(div, 0.95, axis = 0)
+    div50 = np.nanquantile(div, 0.50, axis = 0)
+    div05 = np.nanquantile(div, 0.05, axis = 0)
+    # Shear rate
+    shr = calculate_shr(u, v, dx = 25, dy = 25)
+    shr95 = np.nanquantile(shr, 0.95, axis = 0)
+    shr50 = np.nanquantile(shr, 0.50, axis = 0)
+    shr05 = np.nanquantile(shr, 0.05, axis = 0)    
+    print("Sea ice motion updated")
+
+    ## Read SIC data ==================================================
+    grid_sic0 = np.zeros([len(n_samples), row, col])
+    for i, idx in enumerate(n_samples):
+        t1 = dt.datetime(1970, 1, 1) + dt.timedelta(days = days[idx])
+        t2 = dt.datetime(1970, 1, 1) + dt.timedelta(days = days[idx]+1)
+        grid_sic0[i] = get_SIC(t1, xx, yy, region = region)
+    grid_sic = np.nanmean(grid_sic0, axis = 0)
+    print("SIC updated")
+
+    ## Read ERA5 data =================================================
+    grid_t2m, grid_u10, grid_v10, _, grid_i10 = get_ERA5(ds, 0, xx, yy, region = region)
+    print("ERA5 updated")
+
+    grid_input[0, :, :, 0] = grid_u
+    grid_input[0, :, :, 1] = grid_v
+    grid_input[0, :, :, 2] = grid_sic
+    grid_input[0, :, :, 3] = grid_t2m #grid_t2m - 210)/(310 - 210) #Max temp = 320 K, Min temp = 240 K)
+    grid_input[0, :, :, 4] = grid_u10
+    grid_input[0, :, :, 5] = grid_v10
+    grid_input[0, :, :, 6] = grid_i10
+    grid_input[0, :, :, 7] = div95
+    grid_input[0, :, :, 8] = div50
+    grid_input[0, :, :, 9] = div05
+    grid_input[0, :, :, 10] = shr95
+    grid_input[0, :, :, 11] = shr50
+    grid_input[0, :, :, 12] = shr05
     
-        ## Read SIC data ==================================================
-        grid_sic0 = np.zeros([7, row, col])
-        for n in range(0, 7):
-            t1 = d1[i] + dt.timedelta(days = n)
-            grid_sic0[n] = get_SIC(t1, xx, yy, region = region)
-        grid_sic = np.nanmean(grid_sic0, axis = 0)
-        # print("SIC updated")
+    # Masking ======================================
+    mask1 = (grid_sic == 0) #(np.isnan(grid_u))   
+
+    var_ip = np.shape(grid_input)[3]
+
+    conv_input = np.copy(grid_input)
+
+    for m in range(0, var_ip):
+        subset = grid_input[0, :, :, m]
+        subset[mask1] = np.nan
+        conv_input[0, :, :, m] = subset
     
-        ## Read ERA5 data =================================================
-        times_era = pd.to_datetime(ds.time)
-        idx_era = (times_era >= d1[i]) & (times_era < d2[i])
-        grid_t2m, grid_u10, grid_v10, _, grid_i10 = get_ERA5(ds, idx_era, xx, yy, region = region)
-        # print("ERA5 updated")
+    # conv_input = conv_input[np.array(valid), :, :, :]
     
-        grid_input[i, 0, :, :] = grid_u
-        grid_input[i, 1, :, :] = grid_v
-        grid_input[i, 2, :, :] = grid_sic
-        grid_input[i, 3, :, :] = grid_t2m #grid_t2m - 210)/(310 - 210) #Max temp = 320 K, Min temp = 240 K)
-        grid_input[i, 4, :, :] = grid_u10
-        grid_input[i, 5, :, :] = grid_v10
-        grid_input[i, 6, :, :] = grid_i10
-        grid_input[i, 7, :, :] = np.nanmean(div, axis = 0)
-        grid_input[i, 8, :, :] = np.nanmean(shr, axis = 0)
-        # grid_input[i, :, :] = div05
-        # grid_input[i, :, :] = shr95
-        # grid_input[i, :, :] = shr50
-        # grid_input[i, :, :] = shr05
-        
-    return xx, yy, grid_input, output
+    return xx, yy, conv_input
 
 # READ ICESAT-2 GRID DATA ###################################################
 
-def get_IS2_grid(year, region, d1, d2, filepath = "D:\\IS2_topo_DL"):
+def get_IS2_grid(year, region, filepath = "D:\\IS2_topo_DL"):
     
     ##### Read data ##############################
     try: ncfile.close()  # just to be safe, make sure dataset is not already open.
     except: pass
 
-    is2_nc = f'D:\\IS2_topo_DL\\Ridges_density_{region}_{year}.nc'
-    is2 = xr.open_dataset(is2_nc)
+    ncname = filepath + f'\\Ridges_density_{region}_{year}.nc'
+    ds = xr.open_dataset(ncname)
 
-    with netCDF4.Dataset(is2_nc, 'r') as nc:
+    with netCDF4.Dataset(ncname, 'r') as nc:
         lat = np.array(nc.variables['lat'])
         lon = np.array(nc.variables['lon'])
         x = np.array(nc.variables['x'])
@@ -425,14 +403,28 @@ def get_IS2_grid(year, region, d1, d2, filepath = "D:\\IS2_topo_DL"):
 
         times = nc.variables['time']
         times = num2date(times[:], units = times.units)
+
+        hours = np.array(nc.variables['time']).astype(float)
+        time_era = []
+
+        for i in range(0, len(hours)):
+            time_era.append(dt.datetime(1800, 1, 1) + dt.timedelta(hours = hours[i]))
+
+    date1, date2 = [], []
+    for m in range(1, 13):
+        date1.append(dt.datetime(year,m,1))
+        if m == 12:
+            date2.append(dt.datetime(year+1,1,1))
+        else:
+            date2.append(dt.datetime(year,m+1,1))
     
     fields = ['fb_mode', 'fb_std', 'fr_ridge', 'h_ridge']
-    output = np.zeros([len(d1), len(fields), xx.shape[0], xx.shape[1]])
+    output = np.zeros([len(fields), len(date1), xx.shape[0], xx.shape[1]])
     
     for k, field1 in enumerate(fields):
-        for i in range(0, len(d1)):                
+        for i in range(0, len(date1)):                
     
-            tidx = np.where((times >= 11[i]) & (times < d[i]))[0]
+            tidx = np.where((times >= date1[i]) & (times < date2[i]))[0]
             fb_count = np.nansum(np.array(ds.variables["fb_count"][tidx, :, :]), axis = 0)
             valid_count = (fb_count > 500)
             
@@ -444,7 +436,7 @@ def get_IS2_grid(year, region, d1, d2, filepath = "D:\\IS2_topo_DL"):
     
             output[k, i] = np.transpose(np.nanmean(array, axis = 0))
             
-    return xx, yy, output
+    return output
 ############################################################################
 
 def lookupNearest(x0, y0, xx, yy):
