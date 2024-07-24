@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         help='Model directory',
     )
     parser.add_argument(
-        '--no-cuda',
+        '--cuda',
         type=bool,
         default=True,
         help='disables CUDA training',
@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.cuda = args.cuda and torch.cuda.is_available()
 
     return args
 
@@ -131,7 +131,7 @@ def main() -> None:
 
     first = True
     
-    for year in [2019, 2020]:
+    for year in [2019, 2020, 2021, 2022]:
     
         with open(f'D:\\IS2_topo_DL\\data\\Data_{sector}_{year}.pkl', 'rb') as f:
             [xx, yy, input0, output0] = pickle.load(f)
@@ -163,21 +163,21 @@ def main() -> None:
     n_samples, in_channels = train_input.size()
     _, out_channels = train_output.size()
     print(f"##### TRAINING DATA IS PREPARED (Samples: {n_samples}; model: {args.model}) #####")
+
+    features, hidden_layers = 128, 4
+    net = MLP(in_channels, out_channels, features, hidden_layers)
+    model_name = f"torch_{args.model}_h{hidden_layers}_f{features}"
     
-    net = MLP(in_channels, out_channels)
-    
-    if args.no_cuda:
-        device = torch.device('cpu')
-        device_name = 'cpu'
-    else:
+    if args.cuda:
         device = torch.device('cuda')
         device_name = 'gpu'
-        net = nn.DataParallel(net)        
+        net = nn.DataParallel(net)     
+    else:            
+        device = torch.device('cpu')
+        device_name = 'cpu'
 
     print(device)
     net.to(device)
-
-    model_name = f"torch_{args.model}"
 
     loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
     optimizer = Adam(net.parameters(), lr)
@@ -197,7 +197,8 @@ def main() -> None:
         net.train()
         
         for (data, target) in train_loader:
-            
+            data = data.to(device)
+            target = target.to(device)            
             pred = net(data)
 
             loss = loss_fn(pred*100, target*100)
@@ -213,6 +214,8 @@ def main() -> None:
         val_loss = 0
         val_count = 0
         for (data, target) in val_loader:
+            data = data.to(device)
+            target = target.to(device)
             pred = net(data)
             loss = loss_fn(pred*100, target*100)
             val_loss += loss.cpu().item()
