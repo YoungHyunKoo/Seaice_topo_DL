@@ -26,6 +26,24 @@ import torch.optim as optim
 import dgl
 from dgl.data import DGLDataset
 
+def read_grid_input(files):
+    first = True
+    for file in files:
+    
+        with open(file, 'rb') as f:
+            [xx, yy, input0, output0] = pickle.load(f)
+            input0 = input0[12:] # From April
+            output0 = output0[12:] # From April
+    
+        if first:
+            inputs = input0
+            outputs = output0
+            first = False
+        else:
+            inputs = np.concatenate((inputs, input0), axis = 0)
+            outputs = np.concatenate((outputs, output0), axis = 0)
+    return xx, yy, inputs, outputs
+
 def normalize_input(inputs, c):
     vmax = [+20, +20, 1, 280, +20, +20, 30, +0.5, 0.7, 1]
     vmin = [-20, -20, 0, 230, -20, -20,  0, -0.5, 0.0, 0]
@@ -33,17 +51,82 @@ def normalize_input(inputs, c):
         norm_inputs = 2*(inputs - vmin[c]) / (vmax[c] - vmin[c]) - 1
     else:
         norm_inputs = (inputs - vmin[c]) / (vmax[c] - vmin[c])
+    
     return norm_inputs
 
+def regularize(norm_data):
+    norm_data[norm_data > 1] = 1
+    norm_data[norm_data < -1] = -1
+    return norm_data
+
+def make_mlp_grid(inputs, laps = 4):
+    
+    # Input & output should be entire images for CNN
+    n_samples, var_ip, row, col = np.shape(inputs)
+    
+    first = True
+    for n in range(0, n_samples-laps):
+    
+        ann_input0 = np.zeros([row*col, var_ip * laps])
+        
+        for v in range(0, var_ip):
+            for i in range(0, laps):
+                ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v].flatten(), v)
+    
+        if first:
+            ann_input = ann_input0
+            first = False
+        else:
+            ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+        
+    return ann_input
+
 def make_mlp_input(inputs, outputs, laps = 4):
+    
     # Input & output should be entire images for CNN
     n_samples, var_ip, row, col = np.shape(inputs)
     _, var_op, _, _ = np.shape(outputs)
+
+    mask = ~np.isnan(inputs).any(axis=(0,1))
     
     first = True
     for n in range(0, n_samples-laps):
         sic = inputs[n+laps, 2, :, :]
-        valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0))
+        valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0) & (outputs[n+laps, 0] <= 1) & (mask))
+    
+        n_valid = valid[0].shape[0]
+    
+        ann_input0 = np.zeros([n_valid, var_ip * laps])
+        ann_output0 = np.zeros([n_valid, var_op])
+        
+        for v in range(0, var_ip):
+            for i in range(0, laps):
+                ann_input0[:, v*laps+i] = regularize(normalize_input(inputs[n+i, v][valid], v))
+        for v in range(0, var_op):
+            ann_output0[:, v] = regularize(outputs[n+laps, v][valid])
+    
+        if first:
+            ann_input = ann_input0
+            ann_output = ann_output0
+            first = False
+        else:
+            ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+            ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
+
+        
+    return ann_input, ann_output
+
+def make_gnn_input(inputs, outputs, laps = 4):
+    # Input & output should be entire images for CNN
+    n_samples, var_ip, row, col = np.shape(inputs)
+    _, var_op, _, _ = np.shape(outputs)
+
+    mask = ~np.isnan(inputs).any(axis=(0,1))
+    
+    first = True
+    for n in range(0, n_samples-laps):
+        sic = inputs[n+laps, 2, :, :]
+        valid = np.where((sic > 0.9) & (outputs[n+laps, 0] > 0) & (outputs[n+laps, 0] <= 1) & (mask))
     
         n_valid = valid[0].shape[0]
     
@@ -72,28 +155,78 @@ def make_cnn_input(inputs, outputs, laps = 4):
     n_samples, var_ip, row, col = np.shape(inputs)
     _, var_op, _, _ = np.shape(outputs)
 
-    ann_input = np.zeros([n_samples*row*col, var_ip * laps, row, col])
-    ann_output = np.zeros([n_samples*row*col, var_op, row, col])
-
+    mask = ~np.isnan(inputs).any(axis=(0,1))
+    
     first = True
     for n in range(0, n_samples-laps):
-        sic = data_input[n+laps, 2, :, :]
-        valid = sic > 0.8
+        sic = inputs[n+laps, 2, :, :]
+        valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0) & (outputs[n+laps, 0] <= 1) & (mask))
+    
+        n_valid = valid[0].shape[0]
+    
+        ann_input0 = np.zeros([n_valid, var_ip * laps])
+        ann_output0 = np.zeros([n_valid, var_op])
+        
         for v in range(0, var_ip):
             for i in range(0, laps):
-                ann_input[n, v+i, :, :] = (inputs[n+i, v, :, :])
+                ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v][valid], v)
         for v in range(0, var_op):
-            ann_output[n, v, :, :] = (outputs[n+days, v, :, :])
+            ann_output0[:, v] = outputs[n+laps, v][valid]
+    
+        if first:
+            ann_input = ann_input0
+            ann_output = ann_output0
+            first = False
+        else:
+            ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+            ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
+
+        
     return ann_input, ann_output
 
 ## Dataset for train ===================================
-class make_gnn_output(DGLDataset):
-    def __init__(self, filename):
-        super().__init__(name="pig", url = filename)
+class gnn_input(DGLDataset):
+    def __init__(self, url=None, laps=1, w=3):
+        super(gnn_input, self).__init__(name="graph", url=url, laps=laps, w=w)
         
     def process(self):
         self.graphs = []
         files = self.url
+        laps = self.laps
+        w = self.w
+        inputs, outputs = read_grid_input(files)
+        
+        # Input & output should be entire images for CNN
+        n_samples, var_ip, row, col = np.shape(inputs)
+        _, var_op, _, _ = np.shape(outputs)
+        
+        first = True
+        for n in range(0, n_samples-laps):
+            sic = inputs[n+laps, 2, :, :]
+            valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0))
+        
+            n_valid = valid[0].shape[0]
+        
+            ann_input0 = np.zeros([n_valid, var_ip * laps])
+            ann_output0 = np.zeros([n_valid, var_op])
+
+            
+            for v in range(0, var_ip):
+                for i in range(0, laps):
+                    ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v][valid], v)
+            for v in range(0, var_op):
+                ann_output0[:, v] = outputs[n+laps, v][valid]
+        
+            if first:
+                ann_input = ann_input0
+                ann_output = ann_output0
+                first = False
+            else:
+                ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+                ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
+
+
+        
         
         # # Region filtering
         # filename = f'D:\\ISSM\\Helheim\\Helheim_r100_030.mat'
@@ -212,8 +345,9 @@ class MLP(nn.Module):
         modules = [nn.Linear(ch_input, features)]
         for i in range(hidden_layers):
             modules.append(nn.Linear(features, features))
-            modules.append(nn.ReLU())
+            modules.append(nn.LeakyReLU())
         modules.append(nn.Linear(features, ch_output))
+        modules.append(nn.ReLU())
         self.lin = nn.Sequential(*modules)
 
     def forward(self, in_feat):

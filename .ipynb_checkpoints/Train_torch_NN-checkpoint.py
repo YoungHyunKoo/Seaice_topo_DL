@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
         help='Model directory',
     )
     parser.add_argument(
-        '--no-cuda',
-        action='store_true',
+        '--cuda',
+        type=bool,
         default=True,
         help='disables CUDA training',
     )
@@ -93,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         help='The number of previous weeks considered in the prediction',
     )
     parser.add_argument(
+        '--out-ch',
+        type=int,
+        default=1,
+        help='Output channel of ICESat-2 (0: modal fb, 1: std fb)',
+    )
+    parser.add_argument(
         '--model',
         type=str,
         default='mlp',
@@ -108,13 +114,17 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if 'LOCAL_RANK' in os.environ:
         args.local_rank = int(os.environ['LOCAL_RANK'])
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.cuda = args.cuda and torch.cuda.is_available()
 
     return args
 
     
 ##########################################################################################
-
+def weights_init(m):
+    torch.nn.init.xavier_uniform_(m.weight)
+    if m.bias:
+        torch.nn.init.zeros_(m.bias)
+            
 def main() -> None:
     
     ## Train parameters ##
@@ -128,25 +138,12 @@ def main() -> None:
     lr = args.base_lr
     sector = args.sector
     laps = args.laps
+    c = args.out_ch
 
-    first = True
+    files = glob.glob(f'D:\\IS2_topo_DL\\data\\Data_{sector}_*.pkl')
+    xx, yy, inputs, outputs = read_grid_input(files)
     
-    for year in [2019, 2020]:
-    
-        with open(f'D:\\IS2_topo_DL\\data\\Data_{sector}_{year}.pkl', 'rb') as f:
-            [xx, yy, input0, output0] = pickle.load(f)
-    
-        if first:
-            inputs = input0
-            outputs = output0
-            first = False
-        else:
-            inputs = np.concatenate((inputs, input0), axis = 0)
-            outputs = np.concatenate((outputs, output0), axis = 0)
-
-    del input0, output0
-    
-    ann_input, ann_output = make_mlp_input(inputs[:,:9], outputs[:,1:2], laps = laps)
+    ann_input, ann_output = make_mlp_input(inputs[:,:9], outputs[:,c:c+1], laps = laps)
 
     train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.4, random_state=42)
     
@@ -163,25 +160,26 @@ def main() -> None:
     n_samples, in_channels = train_input.size()
     _, out_channels = train_output.size()
     print(f"##### TRAINING DATA IS PREPARED (Samples: {n_samples}; model: {args.model}) #####")
+
+    features, hidden_layers = 128, 2
+    net = MLP(in_channels, out_channels, features, hidden_layers)
+    model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
+    print(model_name)
     
-    net = MLP(in_channels, out_channels)
-    
-    if args.no_cuda:
-        device = torch.device('cpu')
-        device_name = 'cpu'
-    else:
+    if args.cuda:
         device = torch.device('cuda')
         device_name = 'gpu'
-        net = nn.DataParallel(net)        
+        net = nn.DataParallel(net)     
+    else:            
+        device = torch.device('cpu')
+        device_name = 'cpu'
 
     print(device)
     net.to(device)
 
-    model_name = f"torch_{args.model}"
-
     loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
     optimizer = Adam(net.parameters(), lr)
-    scheduler = ExponentialLR(optimizer, gamma=0.99)
+    scheduler = ExponentialLR(optimizer, gamma=0.98)
 
     history = {'loss': [], 'val_loss': [], 'time': []}
 
@@ -197,7 +195,8 @@ def main() -> None:
         net.train()
         
         for (data, target) in train_loader:
-            
+            data = data.to(device)
+            target = target.to(device)            
             pred = net(data)
 
             loss = loss_fn(pred*100, target*100)
@@ -213,6 +212,8 @@ def main() -> None:
         val_loss = 0
         val_count = 0
         for (data, target) in val_loader:
+            data = data.to(device)
+            target = target.to(device)
             pred = net(data)
             loss = loss_fn(pred*100, target*100)
             val_loss += loss.cpu().item()
