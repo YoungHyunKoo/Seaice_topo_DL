@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--no-cuda',
-        action='store_true',
+        type=bool,
         default=True,
         help='disables CUDA training',
     )
