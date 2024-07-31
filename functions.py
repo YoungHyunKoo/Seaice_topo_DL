@@ -165,8 +165,9 @@ def retrieve_hourly_ERA5(year, months, days, region = "SH"):
     # download_flag = False
     variables = [
         '10m_u_component_of_wind', '10m_v_component_of_wind', 'instantaneous_10m_wind_gust',
-        '2m_temperature', 'sea_ice_cover', 'surface_pressure'
+        '2m_temperature', 'sea_ice_cover', 'surface_pressure', 'skin_temperature'
     ]
+    times = ['00:00', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00', '21:00']
     # api parameters 
     if region == "NH":
         params = {
@@ -176,7 +177,7 @@ def retrieve_hourly_ERA5(year, months, days, region = "SH"):
             'year':[str(year)],
             'month': months,
             'day': days,
-            'time': ['12:00'],
+            'time': times,
             'grid': [1, 0.5],
             'area': [90, -180, 40, 180]
             }
@@ -189,7 +190,7 @@ def retrieve_hourly_ERA5(year, months, days, region = "SH"):
             'year':[str(year)],
             'month': months,
             'day': days,
-            'time': ['12:00'],
+            'time': times,
             'grid': [1, 0.5],
             'area': [-50, -180, -90, 180]
             }
@@ -252,6 +253,10 @@ def rotate_vector(u, v, lon, ref_lon = 0):
     v2 = u*np.sin(angle) + v*np.cos(angle)
     return u2, v2
 
+def wind_consistency(u):
+    u1 = np.nanmean(u, axis = 0) / np.nanstd(u, axis = 0)
+    return u1
+
 def get_ERA5(ds, idx_era, xx, yy, region = "NH", ref_lon = 0):
     lat3, lon3 = np.meshgrid(ds.latitude, ds.longitude)
     inProj = Proj('epsg:4326')
@@ -265,8 +270,8 @@ def get_ERA5(ds, idx_era, xx, yy, region = "NH", ref_lon = 0):
         
     xx3,yy3 = transform(inProj,outProj,lat3,lon3)
     t2m = np.nanmean(np.array(ds.t2m)[idx_era], axis = 0).transpose()
-    u10 = np.nanmean(np.array(ds.u10)[idx_era], axis = 0).transpose()
-    v10 = np.nanmean(np.array(ds.v10)[idx_era], axis = 0).transpose()
+    u10 = wind_consistency(np.array(ds.u10)[idx_era]).transpose()
+    v10 = wind_consistency(np.array(ds.v10)[idx_era]).transpose()
     sic = np.nanmean(np.array(ds.siconc)[idx_era], axis = 0).transpose()
     i10 = np.nanmean(np.array(ds.i10fg)[idx_era], axis = 0).transpose()
     
@@ -336,7 +341,7 @@ def make_dataset(year, sector = "Ross", region = "SH"):
     fields = ['fb_mode', 'fb_std', 'fr_ridge', 'h_ridge']
     output = np.zeros([len(d1), len(fields), row, col])
 
-    for i in n_samples:
+    for i in n_samples[:]:
 
         print(i, d1[i], d2[i])
 

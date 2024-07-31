@@ -26,9 +26,9 @@ import torch.optim as optim
 import dgl
 from dgl.data import DGLDataset
 
-def read_grid_input(files):
+def read_grid_input(files, c):
     first = True
-    for file in files:
+    for file in tqdm(files):
     
         with open(file, 'rb') as f:
             [xx, yy, input0, output0] = pickle.load(f)
@@ -42,6 +42,11 @@ def read_grid_input(files):
         else:
             inputs = np.concatenate((inputs, input0), axis = 0)
             outputs = np.concatenate((outputs, output0), axis = 0)
+
+    inputs = inputs[:,:9]
+    outputs = outputs[:,c:c+1]
+    print("Grid files are read!")
+    
     return xx, yy, inputs, outputs
 
 def normalize_input(inputs, c):
@@ -113,7 +118,7 @@ def make_mlp_input(inputs, outputs, laps = 4):
             ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
             ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
 
-        
+    print(f"MLP dataset is ready for lap time {laps}")
     return ann_input, ann_output
 
 def make_gnn_input(inputs, outputs, laps = 4):
@@ -155,23 +160,24 @@ def make_cnn_input(inputs, outputs, laps = 4):
     n_samples, var_ip, row, col = np.shape(inputs)
     _, var_op, _, _ = np.shape(outputs)
 
-    mask = ~np.isnan(inputs).any(axis=(0,1))
+    inputs[np.isnan(inputs)] = 0
+    # outputs[np.isnan(outputs)] = 0
     
     first = True
-    for n in range(0, n_samples-laps):
-        sic = inputs[n+laps, 2, :, :]
-        valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0) & (outputs[n+laps, 0] <= 1) & (mask))
+    for n in tqdm(range(0, n_samples-laps)):
+        # sic = inputs[n+laps, 2, :, :]
+        # valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0) & (outputs[n+laps, 0] <= 1) & (mask))
     
-        n_valid = valid[0].shape[0]
+        # n_valid = valid[0].shape[0]
     
-        ann_input0 = np.zeros([n_valid, var_ip * laps])
-        ann_output0 = np.zeros([n_valid, var_op])
+        ann_input0 = np.zeros([1, var_ip * laps, row, col])
+        ann_output0 = np.zeros([1, var_op, row, col])
         
         for v in range(0, var_ip):
             for i in range(0, laps):
-                ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v][valid], v)
+                ann_input0[0, v*laps+i] = normalize_input(inputs[n+i, v], v)
         for v in range(0, var_op):
-            ann_output0[:, v] = outputs[n+laps, v][valid]
+            ann_output0[0, v] = outputs[n+laps, v]
     
         if first:
             ann_input = ann_input0
@@ -180,13 +186,13 @@ def make_cnn_input(inputs, outputs, laps = 4):
         else:
             ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
             ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
-
-        
+            
+    print(f"CNN dataset is ready for lap time {laps}")
     return ann_input, ann_output
 
 ## Dataset for train ===================================
 class gnn_input(DGLDataset):
-    def __init__(self, url=None, laps=1, w=3):
+    def __init__(self, url=None, laps=1, w=1):
         super(gnn_input, self).__init__(name="graph", url=url, laps=laps, w=w)
         
     def process(self):
@@ -194,6 +200,7 @@ class gnn_input(DGLDataset):
         files = self.url
         laps = self.laps
         w = self.w
+        n_nodes = (2*w+1)**2
         inputs, outputs = read_grid_input(files)
         
         # Input & output should be entire images for CNN
@@ -201,6 +208,33 @@ class gnn_input(DGLDataset):
         _, var_op, _, _ = np.shape(outputs)
         
         first = True
+
+        if first:
+            src = []
+            dst = []
+            weight = []
+            slope = []
+
+            for i in range(0, n_sample):        
+                p1, p2 = np.where(elements == i)
+                connect = []
+
+                for p in p1:
+                    for k in elements[p]:
+                        if (k != i) and (k not in connect):
+                            connect.append(k)
+                            dist = ((xc[i]-xc[k])**2+(yc[i]-yc[k])**2)**0.5                                
+                            weight.append(np.exp(-(dist/1000)))
+                            slope.append([np.exp(-(dist/1000)), (base[0,i]-base[0,k])/dist, (surface[0,i]-surface[0,k])/dist,
+                                         (vx[0,i]-vx[0,k])/dist, (vy[0,i]-vy[0,k])/dist]) 
+                            src.append(int(i))
+                            dst.append(int(k))
+
+            src = torch.tensor(src)
+            dst = torch.tensor(dst)
+            weight = torch.tensor(weight)
+            slope = torch.arctan(torch.tensor(slope))
+        
         for n in range(0, n_samples-laps):
             sic = inputs[n+laps, 2, :, :]
             valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0))
@@ -209,6 +243,21 @@ class gnn_input(DGLDataset):
         
             ann_input0 = np.zeros([n_valid, var_ip * laps])
             ann_output0 = np.zeros([n_valid, var_op])
+
+            for k in np.range(n_valid):
+                
+                part = np.zeros(n_nodes, var_ip)
+                i = valid[0][k]
+                j = valid[1][k]
+
+            g = dgl.graph((src, dst), num_nodes=(2*w+1)**2)
+            g.ndata['feat'] = inputs
+            g.ndata['label'] = outputs
+            g.edata['weight'] = weight
+            g.edata['slope'] = slope
+
+            
+                
 
             
             for v in range(0, var_ip):
