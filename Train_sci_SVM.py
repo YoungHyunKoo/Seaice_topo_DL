@@ -99,21 +99,9 @@ def parse_args() -> argparse.Namespace:
         help='Output channel of ICESat-2 (0: modal fb, 1: std fb)',
     )
     parser.add_argument(
-        '--features',
-        type=int,
-        default=32,
-        help='Number of the features in hidden layers',
-    )
-    parser.add_argument(
-        '--hl',
-        type=int,
-        default=4,
-        help='Number of hidden layers',
-    )
-    parser.add_argument(
         '--model',
         type=str,
-        default='cnn',
+        default='mlp',
         help='model name',
     )
     parser.add_argument(
@@ -154,17 +142,8 @@ def main() -> None:
 
     files = glob.glob(f'D:\\IS2_topo_DL\\data\\Data_{sector}_*.pkl')
     xx, yy, inputs, outputs = read_grid_input(files, c)
-
-    # Reshape to the appropriate size (96*96) ----------------------------------
-    row0, col0 = xx.shape
-    w = 96    
-    xx = xx[row0//2-w//2:row0//2+w//2, col0//2-w//2:col0//2+w//2]
-    yy = yy[row0//2-w//2:row0//2+w//2, col0//2-w//2:col0//2+w//2]
-    inputs = inputs[:, :, row0//2-w//2:row0//2+w//2, col0//2-w//2:col0//2+w//2]
-    outputs = outputs[:, :, row0//2-w//2:row0//2+w//2, col0//2-w//2:col0//2+w//2]
-    ### -------------------------------------------------------------------------
     
-    ann_input, ann_output = make_cnn_input(inputs, outputs, laps = laps)
+    ann_input, ann_output = make_mlp_input(inputs, outputs, laps = laps)
 
     train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.4, random_state=42)
     
@@ -178,15 +157,12 @@ def main() -> None:
     val_dataset = TensorDataset(val_input, val_output)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-    n_samples, in_channels, row, col = train_input.size()
-    _, out_channels, _, _ = train_output.size()
+    n_samples, in_channels = train_input.size()
+    _, out_channels = train_output.size()
     print(f"##### TRAINING DATA IS PREPARED (Samples: {n_samples}; model: {args.model}) #####")
 
-    features, hidden_layers = args.features, args.hl
-    if args.model == "cnn":
-        net = CNN(in_channels, out_channels, features, hidden_layers, 5)
-    elif args.model == "unet":
-        net = UNet(in_channels, out_channels, features, 5)
+    features, hidden_layers = 128, 2
+    net = MLP(in_channels, out_channels, features, hidden_layers)
     model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
     print(model_name)
     
@@ -201,7 +177,7 @@ def main() -> None:
     print(device)
     net.to(device)
 
-    loss_fn = ref_loss() #nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
+    loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
     optimizer = Adam(net.parameters(), lr)
     scheduler = ExponentialLR(optimizer, gamma=0.98)
 
@@ -223,7 +199,7 @@ def main() -> None:
             target = target.to(device)            
             pred = net(data)
 
-            loss = loss_fn(target*100, pred*100)
+            loss = loss_fn(pred*100, target*100)
             train_loss += loss.cpu().item()
             optimizer.zero_grad()
             loss.backward()
@@ -239,7 +215,7 @@ def main() -> None:
             data = data.to(device)
             target = target.to(device)
             pred = net(data)
-            loss = loss_fn(target*100, pred*100)
+            loss = loss_fn(pred*100, target*100)
             val_loss += loss.cpu().item()
             val_count += 1
 

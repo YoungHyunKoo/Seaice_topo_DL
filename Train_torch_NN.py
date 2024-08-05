@@ -99,6 +99,18 @@ def parse_args() -> argparse.Namespace:
         help='Output channel of ICESat-2 (0: modal fb, 1: std fb)',
     )
     parser.add_argument(
+        '--features',
+        type=int,
+        default=64,
+        help='Number of the features in hidden layers',
+    )
+    parser.add_argument(
+        '--hl',
+        type=int,
+        default=1,
+        help='Number of hidden layers',
+    )
+    parser.add_argument(
         '--model',
         type=str,
         default='mlp',
@@ -145,7 +157,7 @@ def main() -> None:
     
     ann_input, ann_output = make_mlp_input(inputs, outputs, laps = laps)
 
-    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.4, random_state=42)
+    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.3, random_state=42)
     
     train_input = torch.tensor(train_input, dtype=torch.float32)
     train_output = torch.tensor(train_output, dtype=torch.float32)
@@ -161,7 +173,7 @@ def main() -> None:
     _, out_channels = train_output.size()
     print(f"##### TRAINING DATA IS PREPARED (Samples: {n_samples}; model: {args.model}) #####")
 
-    features, hidden_layers = 128, 2
+    features, hidden_layers = args.features, args.hl
     net = MLP(in_channels, out_channels, features, hidden_layers)
     model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
     print(model_name)
@@ -179,7 +191,7 @@ def main() -> None:
 
     loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
     optimizer = Adam(net.parameters(), lr)
-    scheduler = ExponentialLR(optimizer, gamma=0.98)
+    scheduler = ExponentialLR(optimizer, gamma=0.95)
 
     history = {'loss': [], 'val_loss': [], 'time': []}
 
@@ -226,6 +238,9 @@ def main() -> None:
         
         print('Epoch {0} >> Train loss: {1:.4f}; Val loss: {2:.4f} [{3:.2f} sec]'.format(str(epoch).zfill(3),
                                                                                          train_loss/train_count, val_loss/val_count, t1))
+        
+        if (epoch > 100) & (np.nanmin(history['val_loss'][-5:]) > np.nanmean(history['val_loss'][-10:-5])):
+            break
                 
     torch.save(net.state_dict(), f'{model_dir}/{model_name}.pth')
 
