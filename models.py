@@ -25,6 +25,9 @@ import torch.optim as optim
 
 import dgl
 from dgl.data import DGLDataset
+from dgl.nn.pytorch import GINConv, SumPooling   
+from dgl.nn import DenseGraphConv, GraphConv, GATConv, SAGEConv, DenseSAGEConv, ChebConv, DenseChebConv, EGNNConv
+from dgl import function as fn
 
 def read_grid_input(files, c):
     first = True
@@ -121,6 +124,28 @@ def make_mlp_input(inputs, outputs, laps = 4):
     print(f"MLP dataset is ready for lap time {laps}")
     return ann_input, ann_output
 
+def make_rnn_grid(inputs, laps = 4):
+    
+    # Input & output should be entire images for CNN
+    n_samples, var_ip, row, col = np.shape(inputs)
+    
+    first = True
+    for n in range(0, n_samples-laps):
+    
+        ann_input0 = np.zeros([row*col, laps, var_ip])
+        
+        for v in range(0, var_ip):
+            for i in range(0, laps):
+                ann_input0[:, i, v] = normalize_input(inputs[n+i, v].flatten(), v)
+    
+        if first:
+            ann_input = ann_input0
+            first = False
+        else:
+            ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
+        
+    return ann_input
+
 def make_rnn_input(inputs, outputs, laps = 4):
     
     # Input & output should be entire images for CNN
@@ -153,7 +178,7 @@ def make_rnn_input(inputs, outputs, laps = 4):
             ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
             ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
 
-    print(f"MLP dataset is ready for lap time {laps}")
+    print(f"RNN dataset is ready for lap time {laps}")
     return ann_input, ann_output
 
 def make_gnn_input(inputs, outputs, laps = 4):
@@ -225,18 +250,20 @@ def make_cnn_input(inputs, outputs, laps = 4):
     print(f"CNN dataset is ready for lap time {laps}")
     return ann_input, ann_output
 
-## Dataset for train ===================================
+## Graph Dataset for train ===================================
 class gnn_input(DGLDataset):
-    def __init__(self, url=None, laps=1, w=1):
-        super(gnn_input, self).__init__(name="graph", url=url, laps=laps, w=w)
+    def __init__(self, url=None):
+        super(gnn_input, self).__init__(name="graph", url=url)
         
     def process(self):
         self.graphs = []
+        self.labels = []
+        laps = 4
         files = self.url
-        laps = self.laps
-        w = self.w
-        n_nodes = (2*w+1)**2
-        inputs, outputs = read_grid_input(files)
+        w = 1
+        ws = 2*w+1 # size of one width in the square
+        n_nodes = ws**2
+        _, _, inputs, outputs = read_grid_input(files, c= 1)
         
         # Input & output should be entire images for CNN
         n_samples, var_ip, row, col = np.shape(inputs)
@@ -245,178 +272,51 @@ class gnn_input(DGLDataset):
         first = True
 
         if first:
+            center = (ws)*w + w
             src = []
             dst = []
-            weight = []
-            slope = []
+            # weight = []
+            # slope = []
 
-            for i in range(0, n_sample):        
-                p1, p2 = np.where(elements == i)
-                connect = []
-
-                for p in p1:
-                    for k in elements[p]:
-                        if (k != i) and (k not in connect):
-                            connect.append(k)
-                            dist = ((xc[i]-xc[k])**2+(yc[i]-yc[k])**2)**0.5                                
-                            weight.append(np.exp(-(dist/1000)))
-                            slope.append([np.exp(-(dist/1000)), (base[0,i]-base[0,k])/dist, (surface[0,i]-surface[0,k])/dist,
-                                         (vx[0,i]-vx[0,k])/dist, (vy[0,i]-vy[0,k])/dist]) 
-                            src.append(int(i))
-                            dst.append(int(k))
+            for i in range(0, ws):
+                for j in range(0, ws):
+                    src.append(i*ws + j)
+                    dst.append(center)
 
             src = torch.tensor(src)
             dst = torch.tensor(dst)
-            weight = torch.tensor(weight)
-            slope = torch.arctan(torch.tensor(slope))
+            # weight = torch.tensor(weight)
+            # slope = torch.arctan(torch.tensor(slope))
         
-        for n in range(0, n_samples-laps):
+        for n in tqdm(range(0, n_samples-laps)):
             sic = inputs[n+laps, 2, :, :]
             valid = np.where((sic > 0.8) & (outputs[n+laps, 0] > 0))
         
             n_valid = valid[0].shape[0]
-        
-            ann_input0 = np.zeros([n_valid, var_ip * laps])
-            ann_output0 = np.zeros([n_valid, var_op])
 
-            for k in np.range(n_valid):
+            for k in range(n_valid):
                 
-                part = np.zeros(n_nodes, var_ip)
+                part = np.zeros([n_nodes, var_ip * laps])
                 i = valid[0][k]
                 j = valid[1][k]
 
-            g = dgl.graph((src, dst), num_nodes=(2*w+1)**2)
-            g.ndata['feat'] = inputs
-            g.ndata['label'] = outputs
-            g.edata['weight'] = weight
-            g.edata['slope'] = slope
+                for v in range(0, var_ip):
+                    for t in range(0, laps):
+                        part[:, v*laps+t] = normalize_input(inputs[n+t, v, i-1:i+2, j-1:j+2], v).flatten()
 
-            
-                
-
-            
-            for v in range(0, var_ip):
-                for i in range(0, laps):
-                    ann_input0[:, v*laps+i] = normalize_input(inputs[n+i, v][valid], v)
-            for v in range(0, var_op):
-                ann_output0[:, v] = outputs[n+laps, v][valid]
-        
-            if first:
-                ann_input = ann_input0
-                ann_output = ann_output0
-                first = False
-            else:
-                ann_input = np.concatenate((ann_input, ann_input0), axis = 0)
-                ann_output = np.concatenate((ann_output, ann_output0), axis = 0)
-
-
-        
-        
-        # # Region filtering
-        # filename = f'D:\\ISSM\\Helheim\\Helheim_r100_030.mat'
-        # test = sio.loadmat(filename)
-        # mask = test['S'][0][0][11][0]
-
-        first = True
-        # "READING GRAPH DATA..."
-        for filename in tqdm(files[:]):
-            mesh = int(filename.split("_m")[1][:3])
-            rate = int(filename.split("_r")[1][:3])
-            test = sio.loadmat(filename)
-
-            xc = test['S'][0][0][0]
-            yc = test['S'][0][0][1]
-            elements = test['S'][0][0][2]-1
-            smb = test['S'][0][0][3]
-            vx = test['S'][0][0][4]
-            vy = test['S'][0][0][5]
-            vel = test['S'][0][0][6]
-            surface = test['S'][0][0][7]
-            base = test['S'][0][0][8]
-            H = test['S'][0][0][9]
-            f = test['S'][0][0][10]
-            # mask = test['S'][0][0][11]
-            # ice = np.zeros(mask.shape) # Negative: ice; Positive: no-ice
-            # ice[mask > 0] = 0.5 # ice = 0; no-ice = 1
-            # ice = np.where(mask < 0, mask / 1000000, mask/10000)
-
-            n_year, n_sample = H.shape
-            
-            if first:
-                mesh0 = mesh
-            elif mesh0 != mesh:
-                first = True
-                mesh0 = mesh
-
-            if first:
-                src = []
-                dst = []
-                weight = []
-                slope = []
-
-                for i in range(0, n_sample):        
-                    p1, p2 = np.where(elements == i)
-                    connect = []
-
-                    for p in p1:
-                        for k in elements[p]:
-                            if (k != i) and (k not in connect):
-                                connect.append(k)
-                                dist = ((xc[i]-xc[k])**2+(yc[i]-yc[k])**2)**0.5                                
-                                weight.append(np.exp(-(dist/1000)))
-                                slope.append([np.exp(-(dist/1000)), (base[0,i]-base[0,k])/dist, (surface[0,i]-surface[0,k])/dist,
-                                             (vx[0,i]-vx[0,k])/dist, (vy[0,i]-vy[0,k])/dist]) 
-                                src.append(int(i))
-                                dst.append(int(k))
-
-                src = torch.tensor(src)
-                dst = torch.tensor(dst)
-                weight = torch.tensor(weight)
-                slope = torch.arctan(torch.tensor(slope))
-                first = False
-            else:
-                pass                    
-
-            for t in range(0, n_year):
-                # INPUT: x/y coordinates, melting rate, time, SMB, Vx0, Vy0, Surface0, Base0, Thickness0, Floating0
-                inputs = torch.zeros([n_sample, 12])
-                # OUTPUT: Vx, Vy, Vel, Surface, Thickness, Floating
-                outputs = torch.zeros([n_sample, 6])
-
-                ## INPUTS ================================================
-                inputs[:, 0] = torch.tensor((xc[:, 0]-xc.min())/10000) # torch.tensor(xc[0, :]/10000) # torch.tensor((xc[:, 0]-xc.min())/(xc.max()-xc.min())) # X coordinate
-                inputs[:, 1] = torch.tensor((yc[:, 0]-yc.min())/10000) # torch.tensor(yc[0, :]/10000) # torch.tensor((yc[:, 0]-yc.min())/(yc.max()-yc.min())) # Y coordinate
-                inputs[:, 2] = torch.where(torch.tensor(f[0, :]) < 0, rate/100, 0) # Melting rate (0-100)
-                inputs[:, 3] = torch.tensor(t/n_year) # Year
-                inputs[:, 4] = torch.tensor(smb[t, :]/20) # Surface mass balance
-                inputs[:, 5] = torch.tensor(vx[0, :]/10000) # Initial Vx
-                inputs[:, 6] = torch.tensor(vy[0, :]/10000) # Initial Vx
-                inputs[:, 7] = torch.tensor(vel[0, :]/10000) # Initial Vel
-                inputs[:, 8] = torch.tensor(surface[0, :]/5000) # Initial surface elevation
-                inputs[:, 9] = torch.tensor(base[0, :]/5000) # Initial base elevation
-                inputs[:, 10] = torch.tensor(H[0, :]/5000) # Initial ice thickness
-                inputs[:, 11] = torch.tensor(f[0, :]/5000) # Initial floating part
-                # inputs[:, 11] = torch.tensor(ice[0, :]) # Initial ice mask
-
-                ## OUTPUTS ===============================================
-                outputs[:, 0] = torch.tensor(vx[t, :]/10000) # Initial Vx
-                outputs[:, 1] =  torch.tensor(vy[t, :]/10000) # Initial Vx
-                outputs[:, 2] = torch.tensor(vel[t, :]/10000) # Initial surface elevation
-                outputs[:, 3] = torch.tensor(surface[t, :]/5000) # Initial base elevation
-                outputs[:, 4] = torch.tensor(H[t, :]/5000) # Initial ice thickness
-                outputs[:, 5] = torch.tensor(f[t, :]/5000) # Initial floating part 
-                # outputs[:, 5] = torch.tensor(ice[t, :]) # Initial floating part 
-
-                g = dgl.graph((src, dst), num_nodes=n_sample)
-                g.ndata['feat'] = inputs
-                g.ndata['label'] = outputs
-                g.edata['weight'] = weight
-                g.edata['slope'] = slope
-
+                g = dgl.graph((src, dst), num_nodes=(2*w+1)**2)
+                g = dgl.add_self_loop(g)
+                g.ndata['feat'] = torch.tensor(part, dtype=torch.float32)
+                # g.ndata['label'] = outputs
+                # g.edata['weight'] = weight
+                # g.edata['slope'] = slope
+    
                 self.graphs.append(g)
+
+                self.labels.append(torch.tensor(outputs[n+laps, 0, i, j], dtype=torch.float32))
         
     def __getitem__(self, i):
-        return self.graphs[i]
+        return self.graphs[i], self.labels[i]
     
     def __len__(self):
         return len(self.graphs)
@@ -429,7 +329,7 @@ class ref_loss(nn.Module):
 
     def forward(self, obs, prd):
         
-        err = torch.nanmean(torch.square(obs - prd)[~torch.isnan(obs)])
+        err = torch.nanmean(torch.square(obs - prd)[obs > 0])
         
         return err
 ### =======================================================================
@@ -629,5 +529,26 @@ class LSTM1(nn.Module):
         out = self.fc(out) #Final Output
         return out
 
+### GNN ===================================================================
+class GCN(nn.Module):
+    def __init__(self, ch_input, ch_output, features = 128, hidden_layers = 4):
+        super(GCN, self).__init__()
+
+        modules = [GraphConv(ch_input, features)]
+
+        for i in range(hidden_layers):
+            modules.append(GraphConv(features, features))
+            # modules.append(nn.LeakyReLU())
+
+        self.gcn = dgl.nn.Sequential(*modules)
+        self.lin = nn.Linear(features, ch_output)
+        self.activation = nn.ReLU()
+
+    
+    def forward(self, g, in_feat):
+        edge_weight = None #g.edata['weight'].type(torch.float32)
+        h = self.gcn(g, in_feat, edge_weight)
+        out = self.activation(self.lin(h))
+        return out
 
 

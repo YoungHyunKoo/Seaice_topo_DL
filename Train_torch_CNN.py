@@ -166,7 +166,7 @@ def main() -> None:
     
     ann_input, ann_output = make_cnn_input(inputs, outputs, laps = laps)
 
-    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.4, random_state=42)
+    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.3, random_state=42)
     
     train_input = torch.tensor(train_input, dtype=torch.float32)
     train_output = torch.tensor(train_output, dtype=torch.float32)
@@ -201,7 +201,7 @@ def main() -> None:
     print(device)
     net.to(device)
 
-    loss_fn = ref_loss() #nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
+    loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
     optimizer = Adam(net.parameters(), lr)
     scheduler = ExponentialLR(optimizer, gamma=0.98)
 
@@ -220,10 +220,10 @@ def main() -> None:
         
         for (data, target) in train_loader:
             data = data.to(device)
-            target = target.to(device)            
+            target = target.to(device)
             pred = net(data)
-
-            loss = loss_fn(target*100, pred*100)
+            idx = (target > 0)
+            loss = loss_fn(target[idx]*100, pred[idx]*100)
             train_loss += loss.cpu().item()
             optimizer.zero_grad()
             loss.backward()
@@ -239,7 +239,8 @@ def main() -> None:
             data = data.to(device)
             target = target.to(device)
             pred = net(data)
-            loss = loss_fn(target*100, pred*100)
+            idx = (target > 0)
+            loss = loss_fn(target[idx]*100, pred[idx]*100)
             val_loss += loss.cpu().item()
             val_count += 1
 
@@ -250,6 +251,9 @@ def main() -> None:
         
         print('Epoch {0} >> Train loss: {1:.4f}; Val loss: {2:.4f} [{3:.2f} sec]'.format(str(epoch).zfill(3),
                                                                                          train_loss/train_count, val_loss/val_count, t1))
+
+        if (epoch > 20) & (np.nanmin(history['val_loss'][-5:]) > np.nanmean(history['val_loss'][-10:-5])):
+            break
                 
     torch.save(net.state_dict(), f'{model_dir}/{model_name}.pth')
 

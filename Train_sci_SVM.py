@@ -19,6 +19,10 @@ import time
 import pickle
 
 from sklearn.model_selection import train_test_split
+from sklearn import linear_model
+from sklearn.svm import SVR
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import PolynomialFeatures
 
 import torch
 import torch.nn as nn
@@ -67,11 +71,10 @@ def parse_args() -> argparse.Namespace:
         help='input batch size for training (default: 16)',
     )
     parser.add_argument(
-        '--epochs',
+        '--order',
         type=int,
-        default=100,
-        metavar='N',
-        help='number of epochs to train (default: 100)',
+        default=2,
+        help='order of polynomial (default: 2)',
     )
     parser.add_argument(
         '--base-lr',
@@ -85,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default='Ross',
         help='target sector in the Southern Ocean',
+    )
+    parser.add_argument(
+        '--kernel',
+        type=str,
+        default='rbf',
+        help='kernel function for SVM (rbf, linear, polynomial) (default: rbf)',
     )
     parser.add_argument(
         '--laps',
@@ -101,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--model',
         type=str,
-        default='mlp',
+        default='svm',
         help='model name',
     )
     parser.add_argument(
@@ -133,9 +142,6 @@ def main() -> None:
     data_path = args.data_dir
     model_dir = args.model_dir
 
-    n_epochs = args.epochs
-    batch_size = args.batch_size  # size of each batch
-    lr = args.base_lr
     sector = args.sector
     laps = args.laps
     c = args.out_ch
@@ -145,92 +151,51 @@ def main() -> None:
     
     ann_input, ann_output = make_mlp_input(inputs, outputs, laps = laps)
 
-    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.4, random_state=42)
+    train_input, val_input, train_output, val_output = train_test_split(ann_input, ann_output, test_size=0.3, random_state=42)
     
-    train_input = torch.tensor(train_input, dtype=torch.float32)
-    train_output = torch.tensor(train_output, dtype=torch.float32)
-    val_input = torch.tensor(val_input, dtype=torch.float32)
-    val_output = torch.tensor(val_output, dtype=torch.float32)
+    # train_input = torch.tensor(train_input, dtype=torch.float32)
+    # train_output = torch.tensor(train_output, dtype=torch.float32)
+    # val_input = torch.tensor(val_input, dtype=torch.float32)
+    # val_output = torch.tensor(val_output, dtype=torch.float32)
 
-    train_dataset = TensorDataset(train_input, train_output)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size)
-    val_dataset = TensorDataset(val_input, val_output)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-
-    n_samples, in_channels = train_input.size()
-    _, out_channels = train_output.size()
+    # train_dataset = TensorDataset(train_input, train_output)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size)
+    # val_dataset = TensorDataset(val_input, val_output)
+    # val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    print(train_input.shape)
+    n_samples, in_channels = train_input.shape
+    _, out_channels = train_output.shape
     print(f"##### TRAINING DATA IS PREPARED (Samples: {n_samples}; model: {args.model}) #####")
 
-    features, hidden_layers = 128, 2
-    net = MLP(in_channels, out_channels, features, hidden_layers)
-    model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
+    if args.model == "lr":
+        model = linear_model.LinearRegression()
+        poly = PolynomialFeatures(degree = args.order)
+        train_input = poly.fit_transform(train_input)
+        val_input = poly.fit_transform(val_input)
+        model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}{args.order}"
+    elif args.model == "svm":
+        model = SVR(kernel=args.kernel) # "rbf", "linear", "Polynomial"
+        train_output = train_output[:, 0]
+        val_output = val_output[:, 0]        
+        model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_{args.kernel}"
+        
     print(model_name)
-    
-    if args.cuda:
-        device = torch.device('cuda')
-        device_name = 'gpu'
-        net = nn.DataParallel(net)     
-    else:            
-        device = torch.device('cpu')
-        device_name = 'cpu'
 
-    print(device)
-    net.to(device)
+    model.fit(train_input, train_output)
 
-    loss_fn = nn.MSELoss() # nn.L1Loss() #nn.CrossEntropyLoss()
-    optimizer = Adam(net.parameters(), lr)
-    scheduler = ExponentialLR(optimizer, gamma=0.98)
+    train_pred = model.predict(train_input)
+    train_loss = RMSE(train_output, train_pred)
+    train_R = corr(train_output, train_pred)
 
-    history = {'loss': [], 'val_loss': [], 'time': []}
+    val_pred = model.predict(val_input)
+    val_loss = RMSE(val_output, val_pred)
+    val_R = corr(val_output, val_pred)
 
-    total_params = sum(p.numel() for p in net.parameters())
-    print(f"Number of parameters: {total_params}")
-    
-    t0 = time.time()
-    for epoch in range(n_epochs):
-        
-        train_loss = 0.0
-        train_count = 0
-        
-        net.train()
-        
-        for (data, target) in train_loader:
-            data = data.to(device)
-            target = target.to(device)            
-            pred = net(data)
+    print('>> Train RMSE: {0:.4f}; R: {1:.4f}'.format(train_loss, train_R))
+    print('>> Val   RMSE: {0:.4f}; R: {1:.4f}'.format(val_loss, val_R))
 
-            loss = loss_fn(pred*100, target*100)
-            train_loss += loss.cpu().item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            train_count += 1            
-        scheduler.step()
-        
-        ##### VALIDATION ######################
-        net.eval()
-        val_loss = 0
-        val_count = 0
-        for (data, target) in val_loader:
-            data = data.to(device)
-            target = target.to(device)
-            pred = net(data)
-            loss = loss_fn(pred*100, target*100)
-            val_loss += loss.cpu().item()
-            val_count += 1
-
-        t1 = time.time() - t0
-        history['loss'].append(train_loss/train_count)
-        history['val_loss'].append(val_loss/val_count)
-        history['time'].append(t1)
-        
-        print('Epoch {0} >> Train loss: {1:.4f}; Val loss: {2:.4f} [{3:.2f} sec]'.format(str(epoch).zfill(3),
-                                                                                         train_loss/train_count, val_loss/val_count, t1))
-                
-    torch.save(net.state_dict(), f'{model_dir}/{model_name}.pth')
-
-    with open(f'{model_dir}/history_{model_name}.pkl', 'wb') as file:
-        pickle.dump(history, file)
+    with open(f'{model_dir}/{model_name}.pkl','wb') as f:
+        pickle.dump(model, f)
 
 if __name__ == '__main__':
     main()
