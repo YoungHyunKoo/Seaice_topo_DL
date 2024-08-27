@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--model',
         type=str,
-        default='lstm',
+        default='gcn',
         help='model name',
     )
     parser.add_argument(
@@ -213,14 +213,6 @@ def main():
     n_epochs = args.epochs
     batch_size = args.batch_size  # size of each batch
     lr = args.base_lr
-    
-    if args.cuda:
-        device = torch.device('cuda')
-        device_name = 'gpu'
-        net = nn.DataParallel(net)     
-    else:            
-        device = torch.device('cpu')
-        device_name = 'cpu'
 
     sector = args.sector
     dataset = gnn_input(url = glob.glob(f'D:\\IS2_topo_DL\\data\\Data_{sector}_*.pkl'))
@@ -231,7 +223,7 @@ def main():
     
     n_nodes = val_set[0][0].num_nodes()
     in_channels = val_set[0][0].ndata['feat'].shape[1]
-    out_chanels = 1
+    out_channels = args.out_ch
     
     if args.local_rank == 0:
         print(f"## NODE: {n_nodes}; IN: {in_channels}; OUT: {out_channels}")
@@ -240,10 +232,19 @@ def main():
     
     features = args.features
     hidden_layers = args.hl
-    if args.model_type == "gcn":
-        model = GCN(in_channels, out_channels, features, hidden_layers)  # Graph convolutional network    
+    laps = args.laps
+    if args.model == "gcn":
+        model = GCN(in_channels, out_channels, features, hidden_layers)  # Graph convolutional network  
 
-    model_name = f"torch_{sector}_c{c}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
+    if args.cuda:
+        device = torch.device('cuda')
+        device_name = 'gpu'
+        # model = nn.DataParallel(model)     
+    else:            
+        device = torch.device('cpu')
+        device_name = 'cpu'
+
+    model_name = f"torch_{sector}_c{out_channels}_lap{laps}_{args.model}_h{hidden_layers}_f{features}"
     
     model.to(device)
     
@@ -254,7 +255,7 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     if args.local_rank == 0:
         print(model_name)
-        print(f"MODEL: {args.model_type}; Number of parameters: {total_params}")
+        print(f"MODEL: {args.model}; Number of parameters: {total_params}")
     
     history = {'loss': [], 'val_loss': [], 'time': []}
     ti = time.time()
@@ -270,6 +271,7 @@ def main():
         train_count = 0
         for bg, target in train_loader:
             bg = bg.to(device)
+            target = target.to(device)
             feats = bg.ndata['feat']                
             pred = model(bg, feats)            
             loss = criterion(pred*100, target*100)
@@ -285,6 +287,7 @@ def main():
         val_count = 0
         for bg, target in val_loader:
             bg = bg.to(device)
+            target = target.to(device)
             feats = bg.ndata['feat']                
             pred = model(bg, feats)            
             loss = criterion(pred*100, target*100)                
