@@ -157,8 +157,10 @@ def get_SIC(t1, xx, yy, dtype = "noaa", region = "SH"):
         else:
             print("Filename is NOT correct!")
 
+def a(*args, **kwargs): return ""
+
 def retrieve_hourly_ERA5(year, months, days, region = "SH"):
-    c = cdsapi.Client(quiet=True)
+    c = cdsapi.Client(quiet=True, wait_until_complete=False, delete=True, progress=False, warning_callback = a, sleep_max=10)
     # dataset to read
     dataset = 'reanalysis-era5-single-levels'
     # flag to download data
@@ -196,13 +198,17 @@ def retrieve_hourly_ERA5(year, months, days, region = "SH"):
             }
 
     # retrieves the path to the file
-    fl = c.retrieve(dataset, params)
+    # target = 'download.nc'
+    fl = c.retrieve(dataset, params).download()
+    ds = xr.open_dataset(fl)
+    
+    # retrieves the path to the file
+    # fl = c.retrieve(dataset, params)
+    # # load into memory
+    # with urlopen(fl.location) as f:
+    #     ds = xr.open_dataset(f.read())
 
-    # load into memory
-    with urlopen(fl.location) as f:
-        ds = xr.open_dataset(f.read())
-
-    return ds
+    return ds, fl
 
 def retrieve_monthly_ERA5(year, month, region = "SH"):
     c = cdsapi.Client()
@@ -247,8 +253,11 @@ def retrieve_monthly_ERA5(year, month, region = "SH"):
 
     return ds
 
-def rotate_vector(u, v, lon, ref_lon = 0):
-    angle = (lon-ref_lon)*np.pi/180 # rotation angle (radian)
+def rotate_vector(u, v, lon, ref_lon = 0, hemi = "NH"):
+    if hemi == "NH":
+        angle = (lon-ref_lon)*np.pi/180 # rotation angle (radian)
+    else:
+        angle = -(lon-ref_lon)*np.pi/180
     u2 = u*np.cos(angle) - v*np.sin(angle)
     v2 = u*np.sin(angle) + v*np.cos(angle)
     return u2, v2
@@ -275,7 +284,7 @@ def get_ERA5(ds, idx_era, xx, yy, region = "NH", ref_lon = 0):
     sic = np.nanmean(np.array(ds.siconc)[idx_era], axis = 0).transpose()
     i10 = np.nanmean(np.array(ds.i10fg)[idx_era], axis = 0).transpose()
     
-    u10, v10 = rotate_vector(u10, v10, lon3, ref_lon)
+    u10, v10 = rotate_vector(u10, v10, lon3, ref_lon, region)
     
     grid_t2m = griddata((xx3.flatten(), yy3.flatten()), np.array(t2m).flatten(), (xx, yy), method='linear')
     grid_u10 = griddata((xx3.flatten(), yy3.flatten()), np.array(u10).flatten(), (xx, yy), method='linear')
@@ -366,7 +375,7 @@ def make_dataset(year, sector = "Ross", region = "SH"):
                 months.append(m)
             if d not in days:
                 days.append(d)
-        ds = retrieve_hourly_ERA5(year, months, days, region)
+        ds, fl = retrieve_hourly_ERA5(year, months, days, region)
         # print("Load ERA5")
         
         ## Read ice motion data ===========================================
@@ -389,7 +398,7 @@ def make_dataset(year, sector = "Ross", region = "SH"):
         # print("SIC updated")
     
         ## Read ERA5 data =================================================
-        times_era = pd.to_datetime(ds.time)
+        times_era = pd.to_datetime(ds.valid_time) # pd.to_datetime(ds.time)
         idx_era = (times_era >= d1[i]) & (times_era < d2[i])
         grid_t2m, grid_u10, grid_v10, _, grid_i10 = get_ERA5(ds, idx_era, xx, yy, region = region)
         # print("ERA5 updated")
@@ -407,6 +416,9 @@ def make_dataset(year, sector = "Ross", region = "SH"):
         # grid_input[i, :, :] = shr95
         # grid_input[i, :, :] = shr50
         # grid_input[i, :, :] = shr05
+
+        del ds
+        os.remove(fl)
         
     return xx, yy, grid_input, output
 
